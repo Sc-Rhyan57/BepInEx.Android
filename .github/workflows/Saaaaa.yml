@@ -1,0 +1,82 @@
+name: Build BepInEx Android
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Tag da release
+        required: false
+        default: android-latest
+  push:
+    branches: [master, main]
+    paths-ignore:
+      - "**/*.md"
+      - "docs/**"
+
+concurrency:
+  group: bepinex-android-release
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+env:
+  DOTNET_NOLOGO: "1"
+  DOTNET_CLI_TELEMETRY_OPTOUT: "1"
+  DOTNET_SKIP_FIRST_TIME_EXPERIENCE: "1"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Cache NuGet
+        uses: actions/cache@v4
+        with:
+          path: ~/.nuget/packages
+          key: nuget-${{ runner.os }}-${{ hashFiles('**/*.csproj', 'Directory.Build.props', 'nuget.config') }}
+          restore-keys: nuget-${{ runner.os }}-
+
+      - name: Build
+        run: >
+          dotnet build Runtimes/Unity/BepInEx.Unity.IL2CPP/BepInEx.Unity.IL2CPP.csproj
+          -c Release
+          -p:SolutionDir="$GITHUB_WORKSPACE/"
+          -p:GeneratePackageOnBuild=false
+          -nologo -v:m
+
+      - name: Package
+        run: |
+          set -euo pipefail
+          out="bin/Unity.IL2CPP"
+          stage="bin/android-package"
+          rm -rf "$stage" bin/BepInEx-arm64.zip
+          mkdir -p "$stage/core" "$stage/config" "$stage/plugins"
+          find "$out" -maxdepth 1 -type f \( -name '*.dll' -o -name '*.dll.config' -o -name 'BepInEx*.xml' \) -exec cp {} "$stage/core/" \;
+          cp Runtimes/Unity/BepInEx.Unity.IL2CPP/dist/BepInEx.cfg "$stage/config/BepInEx.cfg"
+          touch "$stage/plugins/.keep"
+          test -f "$stage/core/BepInEx.Core.dll"
+          (cd "$stage" && zip -r -X ../BepInEx-arm64.zip core config plugins)
+          unzip -l bin/BepInEx-arm64.zip
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.release_tag || 'android-latest' }}
+        run: |
+          set -euo pipefail
+          gh release delete "$TAG" --yes --cleanup-tag --repo "$GITHUB_REPOSITORY" || true
+          gh release create "$TAG" bin/BepInEx-arm64.zip \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --title "BepInEx Android ($TAG)" \
+            --notes "Pacote BepInEx para o Larp Launcher. Commit ${GITHUB_SHA::7}."
+          echo "URL para o app: https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG/BepInEx-arm64.zip" >> "$GITHUB_STEP_SUMMARY"
